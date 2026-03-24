@@ -58,6 +58,11 @@ def setup_training_loop_kwargs(
     resume     = None, # Load previous network: 'noresume' (default), 'ffhq256', 'ffhq512', 'ffhq1024', 'celebahq256', 'lsundog256', <file>, <url>
     freezed    = None, # Freeze-D: <int>, default = 0 discriminator layers
 
+    # Self-distillation loss.
+    sd_loss    = None, # Self-distillation loss weight: <float>, default = 0.0
+    sd_loss_type = None, # Self-distillation loss type: 'lpips', 'msssim', default = 'lpips'
+    sd_aug     = None, # Self-distillation augmentation: <bool>, default = True
+
     # Performance options (not included in desc).
     fp32       = None, # Disable mixed-precision training: <bool>, default = False
     nhwc       = None, # Use NHWC memory format with FP16: <bool>, default = False
@@ -322,6 +327,26 @@ def setup_training_loop_kwargs(
         args.D_kwargs.block_kwargs.freeze_layers = freezed
 
     # -------------------------------------------------
+    # Self-distillation loss: sd_loss, sd_loss_type, sd_aug
+    # -------------------------------------------------
+
+    if sd_loss is None:
+        sd_loss = 0.0
+    assert isinstance(sd_loss, float)
+    desc += f'-sd{sd_loss:g}'
+    args.loss_kwargs.sd_loss = sd_loss
+
+    if sd_loss_type is None:
+        sd_loss_type = 'lpips'
+    assert isinstance(sd_loss_type, str)
+    args.loss_kwargs.sd_loss_type = sd_loss_type
+
+    if sd_aug is None:
+        sd_aug = True
+    assert isinstance(sd_aug, bool)
+    args.loss_kwargs.sd_aug = sd_aug
+
+    # -------------------------------------------------
     # Performance options: fp32, nhwc, nobench, workers
     # -------------------------------------------------
 
@@ -427,6 +452,11 @@ class CommaSeparatedList(click.ParamType):
 # Transfer learning.
 @click.option('--resume', help='Resume training [default: noresume]', metavar='PKL')
 @click.option('--freezed', help='Freeze-D [default: 0 layers]', type=int, metavar='INT')
+
+# Self-distillation loss.
+@click.option('--sd-loss', help='Self-distillation loss weight [default: 0.0]', type=float, metavar='FLOAT')
+@click.option('--sd-loss-type', help='Self-distillation loss type [default: lpips]', type=click.Choice(['lpips', 'msssim']))
+@click.option('--sd-aug', help='Self-distillation augmentation [default: true]', type=bool, metavar='BOOL')
 
 # Performance options.
 @click.option('--fp32', help='Disable mixed-precision training', type=bool, metavar='BOOL')

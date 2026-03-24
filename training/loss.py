@@ -1,4 +1,4 @@
-﻿# Copyright (c) 2021, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2021, NVIDIA CORPORATION.  All rights reserved.
 #
 # NVIDIA CORPORATION and its licensors retain all intellectual property
 # and proprietary rights in and to this software, related documentation
@@ -11,6 +11,7 @@ import torch
 from torch_utils import training_stats
 from torch_utils import misc
 from torch_utils.ops import conv2d_gradfix
+from training.sd_loss import SDLoss
 
 #----------------------------------------------------------------------------
 
@@ -21,12 +22,13 @@ class Loss:
 #----------------------------------------------------------------------------
 
 class StyleGAN2Loss(Loss):
-    def __init__(self, device, G_mapping, G_synthesis, D, augment_pipe=None, style_mixing_prob=0.9, r1_gamma=10, pl_batch_shrink=2, pl_decay=0.01, pl_weight=2):
+    def __init__(self, device, G_mapping, G_synthesis, D, G_ema, augment_pipe=None, style_mixing_prob=0.9, r1_gamma=10, pl_batch_shrink=2, pl_decay=0.01, pl_weight=2, sd_loss=0.0, sd_loss_type='lpips', sd_aug=True):
         super().__init__()
         self.device = device
         self.G_mapping = G_mapping
         self.G_synthesis = G_synthesis
         self.D = D
+        self.G_ema = G_ema
         self.augment_pipe = augment_pipe
         self.style_mixing_prob = style_mixing_prob
         self.r1_gamma = r1_gamma
@@ -34,6 +36,8 @@ class StyleGAN2Loss(Loss):
         self.pl_decay = pl_decay
         self.pl_weight = pl_weight
         self.pl_mean = torch.zeros([], device=device)
+        self.sd_loss_weight = sd_loss
+        self.sd_loss_module = SDLoss(device, use_aug=sd_aug, loss_type=sd_loss_type)
 
     def run_G(self, z, c, sync):
         with misc.ddp_sync(self.G_mapping, sync):
@@ -46,6 +50,10 @@ class StyleGAN2Loss(Loss):
         with misc.ddp_sync(self.G_synthesis, sync):
             img = self.G_synthesis(ws)
         return img, ws
+
+    def run_G_ema(self, z, c):
+        img = self.G_ema(z, c, truncation_psi=1, noise_mode='random')
+        return img
 
     def run_D(self, img, c, sync):
         if self.augment_pipe is not None:
@@ -69,9 +77,18 @@ class StyleGAN2Loss(Loss):
                 training_stats.report('Loss/scores/fake', gen_logits)
                 training_stats.report('Loss/signs/fake', gen_logits.sign())
                 loss_Gmain = torch.nn.functional.softplus(-gen_logits) # -log(sigmoid(gen_logits))
+
+                with torch.no_grad():
+                    gen_img_ema = self.run_G_ema(gen_z, gen_c)
+                lossG_sd = self.sd_loss_module(gen_img, gen_img_ema)
+                
                 training_stats.report('Loss/G/loss', loss_Gmain)
+                training_stats.report('Loss/G/loss_sd', lossG_sd)
             with torch.autograd.profiler.record_function('Gmain_backward'):
-                loss_Gmain.mean().mul(gain).backward()
+                if self.sd_loss_weight > 0:
+                    (loss_Gmain.mean() + lossG_sd.mean() * self.sd_loss_weight).mul(gain).backward()
+                else:
+                    loss_Gmain.mean().mul(gain).backward()
 
         # Gpl: Apply path length regularization.
         if do_Gpl:
