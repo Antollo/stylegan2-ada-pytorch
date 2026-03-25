@@ -1,4 +1,4 @@
-﻿# Copyright (c) 2021, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2021, NVIDIA CORPORATION.  All rights reserved.
 #
 # NVIDIA CORPORATION and its licensors retain all intellectual property
 # and proprietary rights in and to this software, related documentation
@@ -250,6 +250,8 @@ class MappingNetwork(torch.nn.Module):
 
 #----------------------------------------------------------------------------
 
+_synthesis_layer_generators = {}
+
 @persistence.persistent_class
 class SynthesisLayer(torch.nn.Module):
     def __init__(self,
@@ -283,8 +285,8 @@ class SynthesisLayer(torch.nn.Module):
             self.noise_strength = torch.nn.Parameter(torch.zeros([]))
         self.bias = torch.nn.Parameter(torch.zeros([out_channels]))
 
-    def forward(self, x, w, noise_mode='random', fused_modconv=True, gain=1):
-        assert noise_mode in ['random', 'const', 'none']
+    def forward(self, x, w, noise_mode='random', fused_modconv=True, gain=1, noise_seed=0):
+        assert noise_mode in ['random', 'const', 'none', 'seed']
         in_resolution = self.resolution // self.up
         misc.assert_shape(x, [None, self.weight.shape[1], in_resolution, in_resolution])
         styles = self.affine(w)
@@ -294,6 +296,13 @@ class SynthesisLayer(torch.nn.Module):
             noise = torch.randn([x.shape[0], 1, self.resolution, self.resolution], device=x.device) * self.noise_strength
         if self.use_noise and noise_mode == 'const':
             noise = self.noise_const * self.noise_strength
+        if self.use_noise and noise_mode == 'seed':
+            key = str(x.device)
+            if key not in _synthesis_layer_generators:
+                _synthesis_layer_generators[key] = torch.Generator(device=x.device)
+            gen = _synthesis_layer_generators[key]
+            gen.manual_seed(noise_seed + self.resolution * 7 + self.up * 11)
+            noise = torch.randn([x.shape[0], 1, self.resolution, self.resolution], device=x.device, generator=gen) * self.noise_strength
 
         flip_weight = (self.up == 1) # slightly faster
         x = modulated_conv2d(x=x, weight=self.weight, styles=styles, noise=noise, up=self.up,

@@ -39,7 +39,7 @@ class StyleGAN2Loss(Loss):
         self.sd_loss_weight = sd_loss
         self.sd_loss_module = SDLoss(device, use_aug=sd_aug, loss_type=sd_loss_type)
 
-    def run_G(self, z, c, sync):
+    def run_G(self, z, c, sync, noise_mode='random', noise_seed=0):
         with misc.ddp_sync(self.G_mapping, sync):
             ws = self.G_mapping(z, c)
             if self.style_mixing_prob > 0:
@@ -48,11 +48,12 @@ class StyleGAN2Loss(Loss):
                     cutoff = torch.where(torch.rand([], device=ws.device) < self.style_mixing_prob, cutoff, torch.full_like(cutoff, ws.shape[1]))
                     ws[:, cutoff:] = self.G_mapping(torch.randn_like(z), c, skip_w_avg_update=True)[:, cutoff:]
         with misc.ddp_sync(self.G_synthesis, sync):
-            img = self.G_synthesis(ws)
+            img = self.G_synthesis(ws, noise_mode=noise_mode, noise_seed=noise_seed)
         return img, ws
 
-    def run_G_ema(self, z, c):
-        img = self.G_ema(z, c, truncation_psi=1, noise_mode='random')
+    def run_G_ema(self, z, c, noise_mode='random', noise_seed=0):
+        self.G_ema.eval()
+        img = self.G_ema(z, c, truncation_psi=1, noise_mode=noise_mode, noise_seed=noise_seed)
         return img
 
     def run_D(self, img, c, sync):
@@ -72,14 +73,15 @@ class StyleGAN2Loss(Loss):
         # Gmain: Maximize logits for generated images.
         if do_Gmain:
             with torch.autograd.profiler.record_function('Gmain_forward'):
-                gen_img, _gen_ws = self.run_G(gen_z, gen_c, sync=(sync and not do_Gpl)) # May get synced by Gpl.
+                noise_seed = torch.randint(0, 2**30, [], device=gen_z.device, dtype=torch.int32).item()
+                gen_img, _gen_ws = self.run_G(gen_z, gen_c, sync=(sync and not do_Gpl), noise_mode='seed', noise_seed=noise_seed) # May get synced by Gpl.
                 gen_logits = self.run_D(gen_img, gen_c, sync=False)
                 training_stats.report('Loss/scores/fake', gen_logits)
                 training_stats.report('Loss/signs/fake', gen_logits.sign())
                 loss_Gmain = torch.nn.functional.softplus(-gen_logits) # -log(sigmoid(gen_logits))
 
                 with torch.no_grad():
-                    gen_img_ema = self.run_G_ema(gen_z, gen_c)
+                    gen_img_ema = self.run_G_ema(gen_z, gen_c, noise_mode='seed', noise_seed=noise_seed)
                 lossG_sd = self.sd_loss_module(gen_img, gen_img_ema)
                 
                 training_stats.report('Loss/G/loss', loss_Gmain)
