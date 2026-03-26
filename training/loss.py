@@ -22,13 +22,14 @@ class Loss:
 #----------------------------------------------------------------------------
 
 class StyleGAN2Loss(Loss):
-    def __init__(self, device, G_mapping, G_synthesis, D, G_ema, augment_pipe=None, style_mixing_prob=0.9, r1_gamma=10, pl_batch_shrink=2, pl_decay=0.01, pl_weight=2, sd_loss=0.0, sd_loss_type='lpips', sd_aug=True):
+    def __init__(self, device, G_mapping, G_synthesis, D, G_ema_mapping, G_ema_synthesis, augment_pipe=None, style_mixing_prob=0.9, r1_gamma=10, pl_batch_shrink=2, pl_decay=0.01, pl_weight=2, sd_loss=0.0, sd_loss_type='lpips', sd_aug=True):
         super().__init__()
         self.device = device
         self.G_mapping = G_mapping
         self.G_synthesis = G_synthesis
         self.D = D
-        self.G_ema = G_ema
+        self.G_ema_mapping = G_ema_mapping
+        self.G_ema_synthesis = G_ema_synthesis
         self.augment_pipe = augment_pipe
         self.style_mixing_prob = style_mixing_prob
         self.r1_gamma = r1_gamma
@@ -42,8 +43,9 @@ class StyleGAN2Loss(Loss):
     def run_G(self, z, c, sync, noise_mode='random', noise_seed=0):
         with misc.ddp_sync(self.G_mapping, sync):
             ws = self.G_mapping(z, c)
+            self.G_ema_mapping.eval()
             with torch.no_grad():
-                ws_ema = self.G_ema.mapping(z, c)
+                ws_ema = self.G_ema_mapping(z, c)
             if self.style_mixing_prob > 0:
                 with torch.autograd.profiler.record_function('style_mixing'):
                     cutoff = torch.empty([], dtype=torch.int64, device=ws.device).random_(1, ws.shape[1])
@@ -51,15 +53,15 @@ class StyleGAN2Loss(Loss):
                     z2 = torch.randn_like(z)
                     ws[:, cutoff:] = self.G_mapping(z2, c, skip_w_avg_update=True)[:, cutoff:]
                     with torch.no_grad():
-                        ws_ema[:, cutoff:] = self.G_ema.mapping(z2, c, skip_w_avg_update=True)[:, cutoff:]
+                        ws_ema[:, cutoff:] = self.G_ema_mapping(z2, c, skip_w_avg_update=True)[:, cutoff:]
         with misc.ddp_sync(self.G_synthesis, sync):
             img = self.G_synthesis(ws, noise_mode=noise_mode, noise_seed=noise_seed)
         return img, ws, ws_ema
 
     def run_G_ema(self, ws_ema, noise_mode='random', noise_seed=0):
-        self.G_ema.eval()
+        self.G_ema_synthesis.eval()
         with torch.no_grad():
-            img = self.G_ema.synthesis(ws_ema, noise_mode=noise_mode, noise_seed=noise_seed)
+            img = self.G_ema_synthesis(ws_ema, noise_mode=noise_mode, noise_seed=noise_seed)
         return img
 
     def run_D(self, img, c, sync):
