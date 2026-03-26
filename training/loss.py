@@ -42,18 +42,24 @@ class StyleGAN2Loss(Loss):
     def run_G(self, z, c, sync, noise_mode='random', noise_seed=0):
         with misc.ddp_sync(self.G_mapping, sync):
             ws = self.G_mapping(z, c)
+            with torch.no_grad():
+                ws_ema = self.G_ema.mapping(z, c)
             if self.style_mixing_prob > 0:
                 with torch.autograd.profiler.record_function('style_mixing'):
                     cutoff = torch.empty([], dtype=torch.int64, device=ws.device).random_(1, ws.shape[1])
                     cutoff = torch.where(torch.rand([], device=ws.device) < self.style_mixing_prob, cutoff, torch.full_like(cutoff, ws.shape[1]))
-                    ws[:, cutoff:] = self.G_mapping(torch.randn_like(z), c, skip_w_avg_update=True)[:, cutoff:]
+                    z2 = torch.randn_like(z)
+                    ws[:, cutoff:] = self.G_mapping(z2, c, skip_w_avg_update=True)[:, cutoff:]
+                    with torch.no_grad():
+                        ws_ema[:, cutoff:] = self.G_ema.mapping(z2, c, skip_w_avg_update=True)[:, cutoff:]
         with misc.ddp_sync(self.G_synthesis, sync):
             img = self.G_synthesis(ws, noise_mode=noise_mode, noise_seed=noise_seed)
-        return img, ws
+        return img, ws, ws_ema
 
-    def run_G_ema(self, z, c, noise_mode='random', noise_seed=0):
+    def run_G_ema(self, ws_ema, noise_mode='random', noise_seed=0):
         self.G_ema.eval()
-        img = self.G_ema(z, c, truncation_psi=1, noise_mode=noise_mode, noise_seed=noise_seed)
+        with torch.no_grad():
+            img = self.G_ema.synthesis(ws_ema, noise_mode=noise_mode, noise_seed=noise_seed)
         return img
 
     def run_D(self, img, c, sync):
@@ -74,14 +80,13 @@ class StyleGAN2Loss(Loss):
         if do_Gmain:
             with torch.autograd.profiler.record_function('Gmain_forward'):
                 noise_seed = torch.randint(0, 2**30, [], device=gen_z.device, dtype=torch.int32).item()
-                gen_img, _gen_ws = self.run_G(gen_z, gen_c, sync=(sync and not do_Gpl), noise_mode='seed', noise_seed=noise_seed) # May get synced by Gpl.
+                gen_img, _gen_ws, gen_ws_ema = self.run_G(gen_z, gen_c, sync=(sync and not do_Gpl), noise_mode='seed', noise_seed=noise_seed) # May get synced by Gpl.
                 gen_logits = self.run_D(gen_img, gen_c, sync=False)
                 training_stats.report('Loss/scores/fake', gen_logits)
                 training_stats.report('Loss/signs/fake', gen_logits.sign())
                 loss_Gmain = torch.nn.functional.softplus(-gen_logits) # -log(sigmoid(gen_logits))
 
-                with torch.no_grad():
-                    gen_img_ema = self.run_G_ema(gen_z, gen_c, noise_mode='seed', noise_seed=noise_seed)
+                gen_img_ema = self.run_G_ema(gen_ws_ema, noise_mode='seed', noise_seed=noise_seed)
                 lossG_sd = self.sd_loss_module(gen_img, gen_img_ema)
                 
                 training_stats.report('Loss/G/loss', loss_Gmain)
@@ -96,7 +101,7 @@ class StyleGAN2Loss(Loss):
         if do_Gpl:
             with torch.autograd.profiler.record_function('Gpl_forward'):
                 batch_size = gen_z.shape[0] // self.pl_batch_shrink
-                gen_img, gen_ws = self.run_G(gen_z[:batch_size], gen_c[:batch_size], sync=sync)
+                gen_img, gen_ws, _gen_ws_ema = self.run_G(gen_z[:batch_size], gen_c[:batch_size], sync=sync)
                 pl_noise = torch.randn_like(gen_img) / np.sqrt(gen_img.shape[2] * gen_img.shape[3])
                 with torch.autograd.profiler.record_function('pl_grads'), conv2d_gradfix.no_weight_gradients():
                     pl_grads = torch.autograd.grad(outputs=[(gen_img * pl_noise).sum()], inputs=[gen_ws], create_graph=True, only_inputs=True)[0]
@@ -114,7 +119,7 @@ class StyleGAN2Loss(Loss):
         loss_Dgen = 0
         if do_Dmain:
             with torch.autograd.profiler.record_function('Dgen_forward'):
-                gen_img, _gen_ws = self.run_G(gen_z, gen_c, sync=False)
+                gen_img, _gen_ws, _gen_ws_ema = self.run_G(gen_z, gen_c, sync=False)
                 gen_logits = self.run_D(gen_img, gen_c, sync=False) # Gets synced by loss_Dreal.
                 training_stats.report('Loss/scores/fake', gen_logits)
                 training_stats.report('Loss/signs/fake', gen_logits.sign())
