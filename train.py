@@ -60,8 +60,9 @@ def setup_training_loop_kwargs(
 
     # Self-distillation loss.
     sd_loss    = None, # Self-distillation loss weight: <float>, default = 0.0
-    sd_loss_type = None, # Self-distillation loss type: 'lpips', 'msssim', default = 'lpips'
+    sd_loss_type = None, # Self-distillation loss type: 'lpips', 'msssim', 'dlpips', default = 'lpips'
     sd_aug     = None, # Self-distillation augmentation: <bool>, default = True
+    sd_dlpips_layers = None, # Number of D blocks to use for dlpips: <int>, default = 3
 
     # Performance options (not included in desc).
     fp32       = None, # Disable mixed-precision training: <bool>, default = False
@@ -319,6 +320,30 @@ def setup_training_loop_kwargs(
         args.ada_kimg = 100 # make ADA react faster at the beginning
         args.ema_rampup = None # disable EMA rampup
 
+        # Auto-detect configuration from resume pkl if cfg is auto
+        if cfg == 'auto':
+            try:
+                import legacy
+                with dnnlib.util.open_url(args.resume_pkl) as f:
+                    resume_data = legacy.load_network_pkl(f)
+                
+                G_kwargs_resume = resume_data['G'].init_kwargs
+                D_kwargs_resume = resume_data['D'].init_kwargs
+                
+                if 'mapping_kwargs' in G_kwargs_resume and 'num_layers' in G_kwargs_resume.mapping_kwargs:
+                    args.G_kwargs.mapping_kwargs.num_layers = G_kwargs_resume.mapping_kwargs.num_layers
+                if 'synthesis_kwargs' in G_kwargs_resume and 'channel_base' in G_kwargs_resume.synthesis_kwargs:
+                    args.G_kwargs.synthesis_kwargs.channel_base = G_kwargs_resume.synthesis_kwargs.channel_base
+                    args.D_kwargs.channel_base = G_kwargs_resume.synthesis_kwargs.channel_base
+                if 'synthesis_kwargs' in G_kwargs_resume and 'channel_max' in G_kwargs_resume.synthesis_kwargs:
+                    args.G_kwargs.synthesis_kwargs.channel_max = G_kwargs_resume.synthesis_kwargs.channel_max
+                    args.D_kwargs.channel_max = G_kwargs_resume.synthesis_kwargs.channel_max
+                if 'epilogue_kwargs' in D_kwargs_resume and 'mbstd_group_size' in D_kwargs_resume.epilogue_kwargs:
+                    args.D_kwargs.epilogue_kwargs.mbstd_group_size = D_kwargs_resume.epilogue_kwargs.mbstd_group_size
+                print('Auto-detected network configuration from resume pkl.')
+            except Exception as e:
+                print(f"Warning: Failed to auto-detect configuration from resume pkl: {e}")
+
     if freezed is not None:
         assert isinstance(freezed, int)
         if not freezed >= 0:
@@ -345,6 +370,11 @@ def setup_training_loop_kwargs(
         sd_aug = True
     assert isinstance(sd_aug, bool)
     args.loss_kwargs.sd_aug = sd_aug
+
+    if sd_dlpips_layers is None:
+        sd_dlpips_layers = 3
+    assert isinstance(sd_dlpips_layers, int) and sd_dlpips_layers >= 1
+    args.loss_kwargs.sd_dlpips_layers = sd_dlpips_layers
 
     # -------------------------------------------------
     # Performance options: fp32, nhwc, nobench, workers
@@ -455,8 +485,9 @@ class CommaSeparatedList(click.ParamType):
 
 # Self-distillation loss.
 @click.option('--sd-loss', help='Self-distillation loss weight [default: 0.0]', type=float, metavar='FLOAT')
-@click.option('--sd-loss-type', help='Self-distillation loss type [default: lpips]', type=click.Choice(['lpips', 'msssim']))
+@click.option('--sd-loss-type', help='Self-distillation loss type [default: lpips]', type=click.Choice(['lpips', 'msssim', 'l1', 'l2', 'dlpips']))
 @click.option('--sd-aug', help='Self-distillation augmentation [default: true]', type=bool, metavar='BOOL')
+@click.option('--sd-dlpips-layers', help='Number of D blocks for dlpips [default: 3]', type=int, metavar='INT')
 
 # Performance options.
 @click.option('--fp32', help='Disable mixed-precision training', type=bool, metavar='BOOL')

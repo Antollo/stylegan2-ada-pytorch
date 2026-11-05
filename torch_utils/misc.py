@@ -1,4 +1,4 @@
-﻿# Copyright (c) 2021, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2021, NVIDIA CORPORATION.  All rights reserved.
 #
 # NVIDIA CORPORATION and its licensors retain all intellectual property
 # and proprietary rights in and to this software, related documentation
@@ -154,10 +154,25 @@ def copy_params_and_buffers(src_module, dst_module, require_all=False):
     assert isinstance(src_module, torch.nn.Module)
     assert isinstance(dst_module, torch.nn.Module)
     src_tensors = {name: tensor for name, tensor in named_params_and_buffers(src_module)}
-    for name, tensor in named_params_and_buffers(dst_module):
-        assert (name in src_tensors) or (not require_all)
-        if name in src_tensors:
-            tensor.copy_(src_tensors[name].detach()).requires_grad_(tensor.requires_grad)
+    dst_tensors = {name: tensor for name, tensor in named_params_and_buffers(dst_module)}
+    
+    for name, tensor in dst_tensors.items():
+        if name not in src_tensors:
+            if require_all:
+                raise ValueError(f"Parameter/buffer '{name}' not found in source module")
+            print(f"Warning: Parameter/buffer '{name}' found in destination module but not in source module.")
+            continue
+            
+        src_tensor = src_tensors[name]
+        if src_tensor.shape != tensor.shape:
+            print(f"Warning: Shape mismatch for '{name}': source shape {src_tensor.shape} != destination shape {tensor.shape}.")
+            continue
+            
+        tensor.copy_(src_tensor.detach()).requires_grad_(tensor.requires_grad)
+
+    for name in src_tensors:
+        if name not in dst_tensors:
+            print(f"Warning: Parameter/buffer '{name}' found in source module but not in destination module.")
 
 #----------------------------------------------------------------------------
 # Context manager for easily enabling/disabling DistributedDataParallel

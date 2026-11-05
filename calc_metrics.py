@@ -50,6 +50,8 @@ def subprocess_fn(rank, args, temp_dir):
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     G = copy.deepcopy(args.G).eval().requires_grad_(False).to(device)
+    G_base = copy.deepcopy(args.G_base).eval().requires_grad_(False).to(device) if args.G_base is not None else None
+    D = copy.deepcopy(args.D).eval().requires_grad_(False).to(device) if args.D is not None else None
     if rank == 0 and args.verbose:
         z = torch.empty([1, G.z_dim], device=device)
         c = torch.empty([1, G.c_dim], device=device)
@@ -60,8 +62,10 @@ def subprocess_fn(rank, args, temp_dir):
         if rank == 0 and args.verbose:
             print(f'Calculating {metric}...')
         progress = metric_utils.ProgressMonitor(verbose=args.verbose)
-        result_dict = metric_main.calc_metric(metric=metric, G=G, dataset_kwargs=args.dataset_kwargs,
-            num_gpus=args.num_gpus, rank=rank, device=device, progress=progress)
+        checkpoint_name = os.path.splitext(os.path.basename(args.network_pkl))[0]
+        result_dict = metric_main.calc_metric(metric=metric, G=G, G_base=G_base, D=D, dataset_kwargs=args.dataset_kwargs,
+            num_gpus=args.num_gpus, rank=rank, device=device, progress=progress,
+            checkpoint_name=checkpoint_name, run_dir=args.run_dir)
         if rank == 0:
             metric_main.report_metric(result_dict, run_dir=args.run_dir, snapshot_pkl=args.network_pkl)
         if rank == 0 and args.verbose:
@@ -118,6 +122,16 @@ def calc_metrics(ctx, network_pkl, metrics, data, mirror, gpus, verbose):
         is50k        Inception score for CIFAR-10.
 
     \b
+      Discriminator robustness:
+        disc_robust10k  Discriminator accuracy drop under bilateral filtering
+                        and patch shuffling (10k real + 10k fake).
+
+    \b
+      EMA qualitative analysis:
+        ema_qualitative  Save 40 diagnostic images comparing EMA vs active
+                         generator, ranked by SD Loss and D score.
+
+    \b
       StyleGAN and StyleGAN2 papers:
         fid50k       Frechet inception distance against 50k real images.
         kid50k       Kernel inception distance against 50k real images.
@@ -145,6 +159,8 @@ def calc_metrics(ctx, network_pkl, metrics, data, mirror, gpus, verbose):
     with dnnlib.util.open_url(network_pkl, verbose=args.verbose) as f:
         network_dict = legacy.load_network_pkl(f)
         args.G = network_dict['G_ema'] # subclass of torch.nn.Module
+        args.G_base = network_dict.get('G', None) 
+        args.D = network_dict.get('D', None)
 
     # Initialize dataset options.
     if data is not None:

@@ -22,7 +22,7 @@ class Loss:
 #----------------------------------------------------------------------------
 
 class StyleGAN2Loss(Loss):
-    def __init__(self, device, G_mapping, G_synthesis, D, G_ema_mapping, G_ema_synthesis, augment_pipe=None, style_mixing_prob=0.9, r1_gamma=10, pl_batch_shrink=2, pl_decay=0.01, pl_weight=2, sd_loss=0.0, sd_loss_type='lpips', sd_aug=True):
+    def __init__(self, device, G_mapping, G_synthesis, D, G_ema_mapping, G_ema_synthesis, augment_pipe=None, style_mixing_prob=0.9, r1_gamma=10, pl_batch_shrink=2, pl_decay=0.01, pl_weight=2, sd_loss=0.0, sd_loss_type='lpips', sd_aug=True, sd_dlpips_layers=3):
         super().__init__()
         self.device = device
         self.G_mapping = G_mapping
@@ -38,7 +38,9 @@ class StyleGAN2Loss(Loss):
         self.pl_weight = pl_weight
         self.pl_mean = torch.zeros([], device=device)
         self.sd_loss_weight = sd_loss
-        self.sd_loss_module = SDLoss(device, use_aug=sd_aug, loss_type=sd_loss_type)
+        # For 'dlpips' mode, pass the discriminator so SDLoss can extract features from it.
+        D_for_sd = D if sd_loss_type == 'dlpips' else None
+        self.sd_loss_module = SDLoss(device, use_aug=sd_aug, loss_type=sd_loss_type, D=D_for_sd, dlpips_layers=sd_dlpips_layers)
 
     def run_G(self, z, c, sync, noise_mode='random', noise_seed=0):
         with misc.ddp_sync(self.G_mapping, sync):

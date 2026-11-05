@@ -118,6 +118,7 @@ def training_loop(
     allow_tf32              = False,    # Enable torch.backends.cuda.matmul.allow_tf32 and torch.backends.cudnn.allow_tf32?
     abort_fn                = None,     # Callback function for determining whether to abort training. Must return consistent results across ranks.
     progress_fn             = None,     # Callback function for updating training progress. Called for all ranks.
+    lr_warmup_kimg          = 10,     # Learning rate warmup duration.
 ):
     # Initialize.
     start_time = time.time()
@@ -151,13 +152,6 @@ def training_loop(
     D = dnnlib.util.construct_class_by_name(**D_kwargs, **common_kwargs).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
     G_ema = copy.deepcopy(G).eval()
 
-    # Synchronize all parameters and buffers from rank 0 to ensure
-    # randomly-initialized buffers (e.g. noise_const) are identical across GPUs.
-    if num_gpus > 1:
-        for module in [G, D, G_ema]:
-            for tensor in misc.params_and_buffers(module):
-                torch.distributed.broadcast(tensor, src=0)
-
     # Resume from existing pickle.
     if (resume_pkl is not None) and (rank == 0):
         print(f'Resuming from "{resume_pkl}"')
@@ -165,6 +159,13 @@ def training_loop(
             resume_data = legacy.load_network_pkl(f)
         for name, module in [('G', G), ('D', D), ('G_ema', G_ema)]:
             misc.copy_params_and_buffers(resume_data[name], module, require_all=False)
+
+    # Synchronize all parameters and buffers from rank 0 to ensure
+    # randomly-initialized buffers (e.g. noise_const) and resumed weights are identical across GPUs.
+    if num_gpus > 1:
+        for module in [G, D, G_ema]:
+            for tensor in misc.params_and_buffers(module):
+                torch.distributed.broadcast(tensor, src=0)
 
     # Print network summary tables.
     if rank == 0:
@@ -219,6 +220,7 @@ def training_loop(
         if rank == 0:
             phase.start_event = torch.cuda.Event(enable_timing=True)
             phase.end_event = torch.cuda.Event(enable_timing=True)
+        phase.opt_initial_lrs = [param_group['lr'] for param_group in phase.opt.param_groups]
 
     # Export sample images.
     grid_size = None
@@ -277,6 +279,12 @@ def training_loop(
         for phase, phase_gen_z, phase_gen_c in zip(phases, all_gen_z, all_gen_c):
             if batch_idx % phase.interval != 0:
                 continue
+
+            # Learning rate warmup if resuming from pkl
+            if resume_pkl is not None and lr_warmup_kimg > 0:
+                warmup_ratio = min(1.0, cur_nimg / max(lr_warmup_kimg * 1000, 1))
+                for param_group, initial_lr in zip(phase.opt.param_groups, phase.opt_initial_lrs):
+                    param_group['lr'] = initial_lr * warmup_ratio
 
             # Initialize gradient accumulation.
             if phase.start_event is not None:
@@ -364,7 +372,8 @@ def training_loop(
             for name, module in [('G', G), ('D', D), ('G_ema', G_ema), ('augment_pipe', augment_pipe)]:
                 if module is not None:
                     if num_gpus > 1:
-                        misc.check_ddp_consistency(module, ignore_regex=r'.*\.w_avg')
+                        # misc.check_ddp_consistency(module, ignore_regex=r'.*\.w_avg')
+                        misc.check_ddp_consistency(module, ignore_regex=r'.*\.w_avg|.*\.noise_const')
                     module = copy.deepcopy(module).eval().requires_grad_(False).cpu()
                 snapshot_data[name] = module
                 del module # conserve memory

@@ -1,4 +1,4 @@
-﻿# Copyright (c) 2021, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2021, NVIDIA CORPORATION.  All rights reserved.
 #
 # NVIDIA CORPORATION and its licensors retain all intellectual property
 # and proprietary rights in and to this software, related documentation
@@ -18,6 +18,8 @@ from . import kernel_inception_distance
 from . import precision_recall
 from . import perceptual_path_length
 from . import inception_score
+from . import discriminator_robustness
+from . import ema_qualitative_analysis
 
 #----------------------------------------------------------------------------
 
@@ -108,6 +110,30 @@ def is50k(opts):
     mean, std = inception_score.compute_is(opts, num_gen=50000, num_splits=10)
     return dict(is50k_mean=mean, is50k_std=std)
 
+@register_metric
+def disc_robust10k(opts):
+    opts.dataset_kwargs.update(max_size=None, xflip=False)
+    results = discriminator_robustness.compute_discriminator_robustness(opts, num_real=10000, num_fake=10000)
+    return {f'disc_robust10k_{k}': v for k, v in results.items()}
+
+@register_metric
+def ema_qualitative(opts):
+    opts.dataset_kwargs.update(max_size=None, xflip=False)
+
+    # Place output images in <run_dir>/ema_qualitative/ or fallback to cwd.
+    run_dir = getattr(opts, 'run_dir', None)
+    if run_dir is not None:
+        output_dir = os.path.join(run_dir, 'ema_qualitative')
+    else:
+        output_dir = os.path.join(os.getcwd(), 'ema_qualitative')
+
+    results = ema_qualitative_analysis.compute_ema_qualitative(
+        opts, num_pairs=10000, num_similar=200, num_dissimilar=200,
+        num_top=5, batch_size=64,
+        checkpoint_name=opts.checkpoint_name, output_dir=output_dir,
+    )
+    return {f'ema_qualitative_{k}': v for k, v in results.items()}
+
 #----------------------------------------------------------------------------
 # Legacy metrics.
 
@@ -150,3 +176,22 @@ def ppl_wend(opts):
     return dict(ppl_wend=ppl)
 
 #----------------------------------------------------------------------------
+# New Metrics
+@register_metric
+def clipfid50k_full(opts):
+    opts.dataset_kwargs.update(max_size=None, xflip=False)
+    opts.feature_network = 'resnet50_clip'
+    fid = frechet_inception_distance.compute_fid(opts, max_real=None, num_gen=50000)
+    return dict(clipfid50k_full=fid)
+
+@register_metric
+def sfid50k_full(opts):
+    opts.dataset_kwargs.update(max_size=None, xflip=False)
+    fid = frechet_inception_distance.compute_fid(opts, max_real=None, num_gen=50000, sfid=True)
+    return dict(sfid50k_full=fid)
+
+@register_metric
+def rfid50k_full(opts):
+    opts.dataset_kwargs.update(max_size=None, xflip=False)
+    fid = frechet_inception_distance.compute_fid(opts, max_real=None, num_gen=50000, rfid=True)
+    return dict(rfid50k_full=fid)
